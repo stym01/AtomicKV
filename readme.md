@@ -214,10 +214,17 @@ The system was benchmarked using a custom Python script simulating concurrent cl
 
 | Metric | Result |
 | :--- | :--- |
-| **Total Requests** | 80,000 |
-| **Time Taken** | 8.04 seconds |
-| **Throughput** | **~9,950 Requests/Sec** |
-| **Average Latency** | **32.97 ms** (per SET + GET pair) |
+| **Total Requests** | 80,000 (200 concurrent clients × 400 requests, 50% SET / 50% GET) |
+| **Time Taken** | 7.2 – 7.7 seconds |
+| **Throughput** | **10,000+ Requests/Sec** (10,365 – 11,167 across runs) |
+| **Average Latency** | **~16 ms** per request (p50 ~17 ms, p99 ~40 ms) |
+
+Latency is the round trip measured by the Python client for each request. Measured on a single node under WSL2 (Ubuntu 24.04, Ryzen 5 5500H, 8 vCPUs, on AC power), with client and server on the same machine. On battery in power-saver mode the same test gives ~7,500 req/s at ~22 ms, so CPU frequency matters:
+
+```bash
+./atomickv_server 8081 &
+python3 benchmark.py --threads 200 --requests 400
+```
 
 Running on a standard Linux environment, the single-threaded server comfortably handles roughly 10,000 operations per second.
 

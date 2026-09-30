@@ -7,9 +7,10 @@ import string
 def generate_random_string(length=10):
     letters = string.ascii_lowercase
     return ''.join(random.choice(letters) for i in range(length))
-def worker(host, port, num_requests, results, worker_id):
+def worker(host, port, num_requests, results, latencies, worker_id):
     success_count = 0
     failure_count = 0
+    lat = []
     
     # Pre-generate commands to avoid python generation overhead during the benchmark
     commands = []
@@ -28,9 +29,11 @@ def worker(host, port, num_requests, results, worker_id):
         sock.connect((host, port))
         
         for cmd in commands:
+            t0 = time.perf_counter()
             sock.sendall(cmd)
             # Wait for the server's reply
             data = sock.recv(1024)
+            lat.append(time.perf_counter() - t0)
             if data:
                 success_count += 1
             else:
@@ -42,6 +45,7 @@ def worker(host, port, num_requests, results, worker_id):
         failure_count = num_requests
         
     results[worker_id] = (success_count, failure_count)
+    latencies[worker_id] = lat
 def main():
     parser = argparse.ArgumentParser(description="Benchmark the AtomicKV Cluster")
     parser.add_argument("--host", default="127.0.0.1", help="Target host (default: 127.0.0.1)")
@@ -60,13 +64,14 @@ def main():
     print(f"------------------------------------------")
     print("Running... Please wait.\n")
     results = [None] * args.threads
+    latencies = [None] * args.threads
     threads = []
     
     start_time = time.time()
     
     # Spawn threads
     for i in range(args.threads):
-        t = threading.Thread(target=worker, args=(args.host, args.port, args.requests, results, i))
+        t = threading.Thread(target=worker, args=(args.host, args.port, args.requests, results, latencies, i))
         threads.append(t)
         t.start()
         
@@ -81,6 +86,12 @@ def main():
     total_failures = sum(r[1] for r in results if r)
     
     ops = total_success / duration if duration > 0 else 0
+
+    # Per-request round-trip latency, measured on the client
+    all_lat = sorted(x for l in latencies if l for x in l)
+    def pct(p):
+        return all_lat[min(len(all_lat) - 1, int(p / 100 * len(all_lat)))] * 1000 if all_lat else 0
+    avg_ms = sum(all_lat) / len(all_lat) * 1000 if all_lat else 0
     
     print(f"==========================================")
     print(f" Benchmark Results")
@@ -89,6 +100,8 @@ def main():
     print(f" Total Success : {total_success}")
     print(f" Total Failed  : {total_failures}")
     print(f" Throughput    : {ops:.2f} Requests/Second (OPS)")
+    print(f" Avg latency   : {avg_ms:.2f} ms per request")
+    print(f" p50 / p99     : {pct(50):.2f} ms / {pct(99):.2f} ms")
     print(f"==========================================\n")
 if __name__ == "__main__":
     main()

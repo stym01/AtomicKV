@@ -56,7 +56,7 @@ To verify the scalability of the `epoll` architecture, a custom concurrent Pytho
 | **Total Requests** | 80,000 |
 | **Time Taken** | 8.04 seconds |
 | **Throughput** | **~9,950 Requests/Sec** |
-| **Average Latency** | **32.97 ms** (per SET+GET pair) |
+| **Average Latency** | **~16 ms** per request (p99 ~40 ms, measured by the client) |
 
 > *Note: These results demonstrate the massive throughput advantage of the `epoll` architecture. By eliminating `std::thread` creation and context-switching overhead, the server comfortably handles nearly 10k concurrent operations per second.*
 
