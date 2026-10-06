@@ -159,17 +159,23 @@ void BTree::_split_child(size_t parent_offset, BTreeNode& parent, int i, size_t 
     _write_node(parent_offset, parent);
 }
 
+// Last write wins: overwrites entry i only if the incoming version >= the stored version
+static bool overwrite_if_newer(BTreeNode& node, int i, size_t val_offset, size_t val_len, uint64_t version) {
+    if (version < node.versions[i]) return false;
+    node.value_offsets[i] = val_offset;
+    node.value_lengths[i] = val_len;
+    node.is_deleted[i] = false;
+    node.versions[i] = version;
+    return true;
+}
+
 void BTree::_insert_non_full(size_t node_offset, BTreeNode& node, const std::string& key, size_t val_offset, size_t val_len, uint64_t version) {
     int i = node.num_keys - 1;
-    
+
     // Check for duplicate key — only update if incoming version >= existing version
     for (int j = 0; j < node.num_keys; j++) {
         if (key == node.keys[j]) {
-            if (version >= node.versions[j]) {
-                node.value_offsets[j] = val_offset;
-                node.value_lengths[j] = val_len;
-                node.is_deleted[j] = false;
-                node.versions[j] = version;
+            if (overwrite_if_newer(node, j, val_offset, val_len, version)) {
                 _write_node(node_offset, node);
             }
             return;
@@ -205,6 +211,14 @@ void BTree::_insert_non_full(size_t node_offset, BTreeNode& node, const std::str
         
         if (child.num_keys == MAX_KEYS) {
             _split_child(node_offset, node, i, node.child_pointers[i], child);
+            // The split moved the child's median up into this node. If that median is the
+            // key being written, update it here instead of inserting a duplicate below it.
+            if (key == node.keys[i]) {
+                if (overwrite_if_newer(node, i, val_offset, val_len, version)) {
+                    _write_node(node_offset, node);
+                }
+                return;
+            }
             if (key > node.keys[i]) {
                 i++;
             }
@@ -238,16 +252,23 @@ void BTree::insert(const std::string& key, const std::string& value, uint64_t ve
         new_root.child_pointers[0] = root_offset;
         
         _split_child(new_root_offset, new_root, 0, root_offset, root);
-        
-        int i = 0;
-        if (new_root.keys[0] < key) {
-            i++;
+
+        if (key == new_root.keys[0]) {
+            // The key being written was the old root's median, now the new root's only key
+            if (overwrite_if_newer(new_root, 0, val_offset, val_len, version)) {
+                _write_node(new_root_offset, new_root);
+            }
+        } else {
+            int i = 0;
+            if (new_root.keys[0] < key) {
+                i++;
+            }
+
+            BTreeNode child;
+            _read_node(new_root.child_pointers[i], child);
+            _insert_non_full(new_root.child_pointers[i], child, key, val_offset, val_len, version);
         }
-        
-        BTreeNode child;
-        _read_node(new_root.child_pointers[i], child);
-        _insert_non_full(new_root.child_pointers[i], child, key, val_offset, val_len, version);
-        
+
         root_offset = new_root_offset;
         idx_file.seekp(ROOT_POINTER_OFFSET);
         idx_file.write(reinterpret_cast<const char*>(&root_offset), sizeof(size_t));

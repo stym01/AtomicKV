@@ -1,9 +1,9 @@
 #include "../include/gossip.h"
 
-void GossipManager::update_node(const std::string& ip, int port, int heartbeat) {
+bool GossipManager::update_node(const std::string& ip, int port, int heartbeat) {
     std::lock_guard<std::mutex> lock(gossip_mutex);
     std::string node_id = ip + ":" + std::to_string(port);
-    
+
     if (cluster_state.find(node_id) == cluster_state.end()) {
         cluster_state[node_id] = {ip, port, heartbeat, time(NULL), ALIVE};
     } else {
@@ -13,6 +13,7 @@ void GossipManager::update_node(const std::string& ip, int port, int heartbeat) 
             cluster_state[node_id].status = ALIVE;
         }
     }
+    return cluster_state[node_id].status == ALIVE;
 }
 
 std::vector<GossipNode> GossipManager::get_dead_nodes(int timeout_seconds) {

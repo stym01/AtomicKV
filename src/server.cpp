@@ -15,6 +15,7 @@
 #include <random>
 #include <csignal>
 #include <atomic>
+#include <stdexcept>
 
 #include "../include/kv_store.h"
 #include "../include/cluster.h"
@@ -298,6 +299,42 @@ void anti_entropy_worker() {
 }
 
 // ============================================================================
+//  Gossip messages
+//  "GOSSIP <ip> <port> <heartbeat> <ip:port:hb> <ip:port:hb> ..."
+//  After its own heartbeat, the sender lists every node it believes is alive,
+//  so membership spreads to nodes that never contact each other directly.
+// ============================================================================
+std::string build_gossip_message(const std::string& type, int heartbeat) {
+    std::string msg = type + " " + my_ip + " " + std::to_string(my_port) + " " + std::to_string(heartbeat);
+    for (const auto& node : gossip_mgr.get_alive_nodes()) {
+        msg += " " + node.ip + ":" + std::to_string(node.port) + ":" + std::to_string(node.heartbeat);
+    }
+    return msg + "\n";
+}
+
+void merge_gossip_peers(std::stringstream& ss) {
+    std::string entry;
+    while (ss >> entry) {
+        size_t first = entry.find(':');
+        size_t last = entry.rfind(':');
+        if (first == std::string::npos || first == last) continue;
+        try {
+            std::string ip = entry.substr(0, first);
+            int port = std::stoi(entry.substr(first + 1, last - first - 1));
+            int heartbeat = std::stoi(entry.substr(last + 1));
+            if (ip == my_ip && port == my_port) continue; // our own entry, seen through a peer
+
+            // Second-hand news: only put the node on the ring if it is still alive
+            if (gossip_mgr.update_node(ip, port, heartbeat)) {
+                ring.add_node(ip, port);
+            }
+        } catch (const std::exception&) {
+            continue; // ignore malformed entries
+        }
+    }
+}
+
+// ============================================================================
 //  Background Worker: Gossip Protocol
 //  Heartbeat + failure detection + auto-discovery.
 // ============================================================================
@@ -344,11 +381,23 @@ void gossip_worker() {
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
 
         if (connect(sock, (struct sockaddr*)&target_addr, sizeof(target_addr)) >= 0) {
-            std::string gossip_msg = "GOSSIP " + my_ip + " " + std::to_string(my_port) + " " + std::to_string(current_hb) + "\n";
+            std::string gossip_msg = build_gossip_message("GOSSIP", current_hb);
             send(sock, gossip_msg.c_str(), gossip_msg.size(), 0);
-            
-            char buffer[1024];
-            read(sock, buffer, sizeof(buffer));
+
+            // The reply carries the target's heartbeat and its view of the cluster
+            char buffer[1024] = {0};
+            int valread = read(sock, buffer, sizeof(buffer));
+            if (valread > 0) {
+                std::stringstream rss(std::string(buffer, valread));
+                std::string reply_type, reply_ip;
+                int reply_port = 0, reply_hb = 0;
+                rss >> reply_type >> reply_ip >> reply_port >> reply_hb;
+                if (reply_type == "GOSSIP_ACK" && reply_port > 0) {
+                    gossip_mgr.update_node(reply_ip, reply_port, reply_hb);
+                    ring.add_node(reply_ip, reply_port);
+                    merge_gossip_peers(rss);
+                }
+            }
         } else {
             // Immediate connect failure might imply dead node, but we rely on the 10s timeout to be safe.
         }
@@ -391,13 +440,16 @@ void process_client_request(int client_socket, int epoll_fd, const std::string& 
         ring.add_node(target_ip, target_port);
         // ring_version increments automatically, which triggers migration_worker
 
+        // Learn about the nodes the sender knows
+        merge_gossip_peers(ss);
+
         if (command == "GOSSIP") {
             int current_hb;
             {
                 std::lock_guard<std::mutex> lock(hb_mutex);
                 current_hb = my_heartbeat;
             }
-            result = "GOSSIP_ACK " + my_ip + " " + std::to_string(my_port) + " " + std::to_string(current_hb) + "\n";
+            result = build_gossip_message("GOSSIP_ACK", current_hb);
             send(client_socket, result.c_str(), result.size(), 0);
         }
         return;
@@ -567,9 +619,8 @@ int main(int argc, char* argv[]) {
         }
     }
     
-    if (ring.is_empty()) {
-        ring.add_node(my_ip, my_port);
-    }
+    // Every node owns a share of the ring, including nodes that joined through a seed
+    ring.add_node(my_ip, my_port);
 
     // Start background threads
     std::thread rep_thread(replication_worker);
