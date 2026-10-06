@@ -14,7 +14,9 @@
 ## Motivation
 I built AtomicKV to deeply understand the internals of distributed databases like Redis and Cassandra. Reading academic papers wasn't enough, so I wanted to implement the core concepts—like non-blocking I/O, custom B-Trees, and eventual consistency—entirely from scratch. 
 
-What started as a simple in-memory cache evolved into a distributed, fault-tolerant system capable of handling nearly 10,000 concurrent connections on a single thread. 
+What started as a simple in-memory cache evolved into a distributed, fault-tolerant system that serves 10,000+ requests per second on a single thread (200 concurrent clients in my benchmark).
+
+📝 **Full write-ups:** [Part 1, the storage engine (epoll, LRU cache, Bloom filter, B-Tree)](https://www.satyamk.dev/blog/atomickv-key-value-store-cpp-epoll-btree) · [Part 2, the distributed layer (consistent hashing, gossip, replication, read repair)](https://www.satyamk.dev/blog/atomickv-distributed-consistent-hashing-gossip-replication)
 
 If you are reviewing this project, this document walks through the exact engineering journey, architectural decisions, and trade-offs made along the way.
 
@@ -155,7 +157,7 @@ sequenceDiagram
 
 ### Phase 3: Gossip Protocol & Failure Detection
 How does the cluster know when a node dies without a central master server? **Gossip Protocol**. 
-Every few seconds, a node randomly selects another node and whispers its state. If a node stops responding for a 10-second timeout, the cluster marks it as dead and automatically rebalances the Consistent Hash Ring.
+Every 2 seconds, each node sends its heartbeat, together with its view of every live member, to a random peer. The peer merges that view and replies with its own, so membership spreads through the whole cluster even between nodes that never talk directly. If a node's heartbeat stops increasing for 10 seconds, it is marked dead and removed from the Consistent Hash Ring, and its keys migrate to their new owners.
 
 ```mermaid
 graph TD
@@ -178,7 +180,8 @@ graph TD
 ## 4. Conflict Resolution (Eventual Consistency)
 Because the system prioritizes High Availability (AP in the CAP theorem), data conflicts will inevitably occur.
 * **Lamport Clocks:** Every write operation increments a logical clock. If two clients update the exact same key on different nodes simultaneously, the cluster uses the Lamport Clock to determine the "winner" (Last Write Wins).
-* **Anti-Entropy & Merkle Trees:** Background workers continuously compare data between nodes to repair stale records. To avoid clogging the network, nodes build **Merkle Trees** of their data. They compare root hashes, and if they differ, they traverse the tree to find and exchange only the exact differing keys.
+* **Read Repair:** After every `GET`, a background task asks the replicas for their copy and version, and fixes whichever side is stale.
+* **Anti-Entropy:** Every 30 seconds, a background worker compares every key a node owns with its replicas, so keys that nobody reads also converge. Comparing **Merkle trees** of key ranges, so that only differing ranges are exchanged, is the planned next step.
 
 ---
 
@@ -286,8 +289,8 @@ OK
 
 ### Docker
 ```bash
-docker build -t AtomicKV .
-docker run -d -p 8081:8081 AtomicKV
+docker build -t atomickv .
+docker run -d -p 8081:8081 atomickv
 ```
 
 ### AWS EC2
@@ -319,5 +322,9 @@ OK
 ---
 
 ## What I Learned
-This project was an exercise in understanding system-level programming. Implementing a B-Tree from scratch, working directly with the Linux kernel (`epoll`), and dealing with distributed consensus and lock-free structures provided a much deeper appreciation for production databases.
+This project was an exercise in understanding system-level programming. Implementing a B-Tree from scratch, working directly with the Linux kernel (`epoll`), and dealing with replication, failure detection and eventual consistency provided a much deeper appreciation for production databases. Testing the cluster the way a stranger would, by following this README with three nodes and killing one, found two membership bugs that every single-node test had missed; [part 2 of the write-up](https://www.satyamk.dev/blog/atomickv-distributed-consistent-hashing-gossip-replication) covers them.
+
+---
+
+Built by [Satyam Kesharwani](https://www.satyamk.dev) · [LinkedIn](https://www.linkedin.com/in/stym01/) · [Engineering blog](https://www.satyamk.dev/blog)
 

@@ -16,8 +16,8 @@ COPY . .
 # Build the project using your Makefile
 RUN make
 
-# Expose port 8080 (so we can connect from outside)
-EXPOSE 8080
+# Expose the node's port (so we can connect from outside)
+EXPOSE 8081
 
 # Command to run the server when container starts
-CMD ["./atomickv_server"]
+CMD ["./atomickv_server", "8081"]
